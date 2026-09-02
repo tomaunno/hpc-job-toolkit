@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hpc-job-toolkit"
+version = "0.1.0"
+description = "Drive a Slurm or Grid Engine cluster from your laptop: sync, submit, watch, pull, and account for jobs with one command."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Toma Unno" }]
+keywords = ["HPC", "Slurm", "Grid Engine", "UGE", "batch jobs", "ssh", "automation"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: System :: Distributed Computing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+hpcjob = "hpcjob.cli:main"
+
+[project.urls]
+Repository = "https://github.com/tomaunno/hpc-job-toolkit"
+
+[tool.setuptools.packages.find]
+include = ["hpcjob*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

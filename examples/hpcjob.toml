@@ -1,0 +1,38 @@
+# hpc-job-toolkit configuration. Copy next to your project and edit.
+# Every command is run as: hpcjob [--config hpcjob.toml] [--dry-run] <command>
+
+[remote]
+host = "mycluster"              # a Host entry in ~/.ssh/config (key-based login, no password prompts)
+workdir = "/home/alice/project" # remote project directory; src/ files are copied here
+scheduler = "slurm"             # "slurm" or "uge" (Univa / Son of Grid Engine)
+account = ""                    # Slurm --account / UGE -g; leave empty to omit
+logdir = "auto/logs"            # relative to workdir
+jobsdir = "auto/jobs"           # relative to workdir
+
+[local]
+src = "src"                     # local folder synced to workdir (non-recursive)
+jobs = "jobs"                   # local folder with *.sh job scripts
+results = "results"             # default destination for `hpcjob pull`
+sync_extensions = [".py", ".sh", ".json", ".toml", ".yaml", ".csv", ".npz"]
+text_extensions = [".py", ".sh", ".json", ".toml", ".yaml", ".csv", ".md"]   # CRLF -> LF after upload
+
+[defaults]
+resource = "--gres=gpu:1 --nodes=1"   # Slurm: passed verbatim.  UGE example: "gpu_1=1" (becomes -l gpu_1=1)
+walltime = "4:00:00"
+max_walltime = "24:00:00"       # submit refuses anything longer
+trial_max_walltime = "0:03:00"  # cap for `submit --trial`
+poll_seconds = 60               # `watch` polls the scheduler at most this often
+connect_timeout = 15
+
+# Override any scheduler command template (see hpcjob/schedulers.py for placeholders).
+[templates]
+# status = "squeue --me"
+
+# Optional cost model:  cost = nodes * coefficient[resource] * (elapsed_weight*elapsed + requested_weight*requested) / 3600
+[cost]
+elapsed_weight = 1.0
+requested_weight = 0.0
+[cost.coefficient]
+"gres/gpu" = 1.0
+"gpu_1" = 0.2
+"node_q" = 0.25
