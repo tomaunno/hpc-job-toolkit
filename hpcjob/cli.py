@@ -10,18 +10,24 @@ import argparse
 import datetime as dt
 import glob
 import os
+import shutil
+import subprocess
 import sys
+import time
 
 from .accounting import parse_accounting, summarise, write_csv
 from .config import Config, load_config, parse_walltime
 from .remote import Remote, RemoteError
 from .schedulers import get_scheduler
 
+EXIT_STILL_RUNNING = 3      # `watch --max-minutes` gave up waiting; the job is still queued or running
+MAX_CHECK_FAILURES = 5      # consecutive failed status checks before `watch` gives up
+
 
 class App:
     def __init__(self, cfg: Config, dry_run: bool = False):
         self.cfg = cfg
-        self.remote = Remote(cfg.host, cfg.connect_timeout, dry_run=dry_run)
+        self.remote = Remote(cfg.host, cfg.connect_timeout, dry_run=dry_run, ssh=cfg.ssh, scp=cfg.scp)
         self.sched = get_scheduler(cfg.scheduler, cfg.templates)
 
     # ---- paths ----------------------------------------------------------------
@@ -86,12 +92,34 @@ class App:
         print(self.remote.run(self.sched.log.format(
             logdir=self.cfg.remote_logdir, jobid=jobid, lines=lines)).rstrip())
 
-    def watch(self, jobid: str) -> None:
-        # One ssh session, polling on the login node no more often than poll_seconds
-        # (most centres ask users not to hammer the scheduler).
-        print(f"watching job {jobid} (poll every {self.cfg.poll_seconds}s) ...")
-        self.remote.stream(self.sched.watch_command(
-            jobid=jobid, logdir=self.cfg.remote_logdir, poll=self.cfg.poll_seconds))
+    def watch(self, jobid: str, max_minutes: float | None = None) -> int:
+        # Poll from this side, one short ssh per poll_seconds: a loop left running on the
+        # login node would break the run-time limit many centres set there.
+        poll = max(self.cfg.poll_seconds, 1)
+        deadline = time.monotonic() + max_minutes * 60 if max_minutes else None
+        print(f"watching job {jobid} (poll every {poll}s) ...", flush=True)
+        running = self.sched.is_running.format(jobid=jobid)
+        failures = 0
+        while not self.remote.dry_run:
+            code = self.remote.code(running)
+            if code == 1:
+                break
+            if code == 0:
+                failures = 0
+            else:                       # ssh or the scheduler hiccuped: keep waiting, but not forever
+                failures += 1
+                print(f"warning: could not check job {jobid} (exit {code}); retrying", flush=True)
+                if failures >= MAX_CHECK_FAILURES:
+                    raise RemoteError(f"could not check job {jobid} {failures} times in a row")
+            if deadline is not None and time.monotonic() + poll > deadline:
+                print(f"STILL_RUNNING: job {jobid} has not finished after {max_minutes:g} min; "
+                      f"run watch again to keep waiting")
+                return EXIT_STILL_RUNNING
+            time.sleep(poll)
+        print(f"--- job {jobid} finished ---")
+        print(self.remote.run(self.sched.tail_command(
+            jobid=jobid, logdir=self.cfg.remote_logdir)).rstrip())
+        return 0
 
     def cancel(self, jobids: list[str]) -> None:
         for j in jobids:
@@ -142,6 +170,34 @@ class App:
         print(report)
 
 
+def msys_root() -> str | None:
+    """Folder that Git Bash (MSYS) maps '/' to, when hpcjob is started from it on Windows."""
+    if os.name != "nt" or "MSYSTEM" not in os.environ:
+        return None
+    cygpath = shutil.which("cygpath")
+    if not cygpath:
+        return None
+    r = subprocess.run([cygpath, "-m", "/"], capture_output=True, text=True)
+    root = r.stdout.strip().rstrip("/")
+    return root if r.returncode == 0 and root else None
+
+
+def undo_msys_conversion(values: list[str], root: str | None) -> list[str]:
+    """Git Bash rewrites '/gs/fs/x' into 'C:/.../Git/gs/fs/x' before a Windows program
+    sees it. Cluster paths must reach the cluster as typed, so strip the prefix again
+    (also inside '--opt=/path'). Only values that start with the MSYS root change."""
+    if not root:
+        return values
+    out = []
+    for v in values:
+        head, eq, tail = v.partition("=") if v.startswith("-") and "=" in v else ("", "", v)
+        norm = tail.replace("\\", "/")
+        if norm.lower().startswith(root.lower() + "/"):
+            tail = norm[len(root):]
+        out.append(head + eq + tail)
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="hpcjob", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -159,6 +215,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="queue status")
     lg = sub.add_parser("log", help="tail a job's log"); lg.add_argument("jobid"); lg.add_argument("--lines", type=int, default=100)
     w = sub.add_parser("watch", help="wait for a job to finish, then show its log"); w.add_argument("jobid")
+    w.add_argument("--max-minutes", type=float,
+                   help=f"stop waiting after this long and exit {EXIT_STILL_RUNNING} (the job keeps running)")
     c = sub.add_parser("cancel", help="cancel job(s)"); c.add_argument("jobids", nargs="+")
     pl = sub.add_parser("pull", help="download results"); pl.add_argument("remote_rel"); pl.add_argument("local_dir", nargs="?")
     ps = sub.add_parser("push", help="upload a local folder (non-recursive)"); ps.add_argument("local_dir"); ps.add_argument("remote_rel")
@@ -169,6 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     ns = build_parser().parse_args(argv)
+    root = msys_root()
+    for attr in ("args", "cmd"):                   # words that run on the cluster
+        if isinstance(getattr(ns, attr, None), list):
+            setattr(ns, attr, undo_msys_conversion(getattr(ns, attr), root))
+    if getattr(ns, "remote_rel", None):
+        ns.remote_rel = undo_msys_conversion([ns.remote_rel], root)[0]
     try:
         cfg = load_config(ns.config)
         app = App(cfg, dry_run=ns.dry_run)
@@ -181,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         elif ns.command == "log":
             app.log(ns.jobid, ns.lines)
         elif ns.command == "watch":
-            app.watch(ns.jobid)
+            return app.watch(ns.jobid, ns.max_minutes)
         elif ns.command == "cancel":
             app.cancel(ns.jobids)
         elif ns.command == "pull":

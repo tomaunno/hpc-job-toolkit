@@ -8,6 +8,8 @@ scheduler = "slurm"             # "slurm" or "uge" (Univa / Son of Grid Engine)
 account = ""                    # Slurm --account / UGE -g; leave empty to omit
 logdir = "auto/logs"            # relative to workdir
 jobsdir = "auto/jobs"           # relative to workdir
+# ssh = "ssh"                   # ssh / scp executables; on Windows, C:/Windows/System32/OpenSSH/ssh.exe
+# scp = "scp"                   # talks to the Windows ssh-agent (Git Bash's ssh does not)
 
 [local]
 src = "src"                     # local folder synced to workdir (non-recursive)

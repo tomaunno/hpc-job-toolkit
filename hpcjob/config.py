@@ -14,6 +14,8 @@ class Config:
     account: str = ""
     logdir: str = "auto/logs"            # relative to workdir
     jobsdir: str = "auto/jobs"           # relative to workdir
+    ssh: str = "ssh"                     # ssh / scp executables (e.g. Windows OpenSSH for its ssh-agent)
+    scp: str = "scp"
     local_src: str = "src"
     local_jobs: str = "jobs"
     local_results: str = "results"
@@ -61,6 +63,8 @@ def load_config(path: str) -> Config:
         account=remote.get("account", ""),
         logdir=remote.get("logdir", "auto/logs").strip("/"),
         jobsdir=remote.get("jobsdir", "auto/jobs").strip("/"),
+        ssh=remote.get("ssh", "ssh"),
+        scp=remote.get("scp", "scp"),
         local_src=local.get("src", "src"),
         local_jobs=local.get("jobs", "jobs"),
         local_results=local.get("results", "results"),

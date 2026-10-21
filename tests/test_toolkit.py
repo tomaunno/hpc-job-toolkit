@@ -4,8 +4,9 @@ import textwrap
 import pytest
 
 from hpcjob.accounting import job_cost, parse_qacct, parse_sacct, summarise
-from hpcjob.cli import App, main
+from hpcjob.cli import App, main, undo_msys_conversion
 from hpcjob.config import load_config, parse_walltime
+from hpcjob.remote import RemoteError
 from hpcjob.schedulers import SLURM, UGE, get_scheduler
 
 QACCT_SAMPLE = textwrap.dedent("""\
@@ -83,9 +84,9 @@ def test_template_override_and_validation():
         get_scheduler("uge", {"nonsense": "x"})
 
 
-def test_watch_command_polls_at_configured_interval():
-    cmd = UGE.watch_command(jobid="42", logdir="/l", poll=60)
-    assert "sleep 60" in cmd and "qstat -j 42" in cmd and "*.o42" in cmd
+def test_tail_command_reads_the_job_log():
+    cmd = UGE.tail_command(jobid="42", logdir="/l", lines=80)
+    assert cmd.startswith("tail -n 80 /l/*.o42") and "no log found" in cmd
 
 
 # ---- accounting -------------------------------------------------------------------
@@ -166,6 +167,61 @@ def test_main_dry_run_status(project, capsys):
     rc = main(["--config", str(project / "hpcjob.toml"), "--dry-run", "status"])
     assert rc == 0
     assert "[dry-run] ssh -o BatchMode=yes" in capsys.readouterr().out
+
+
+def test_configured_ssh_and_scp_executables_are_used(project):
+    toml = project / "hpcjob.toml"
+    toml.write_text(toml.read_text().replace(
+        'host = "cluster"', 'host = "cluster"\nssh = "C:/OpenSSH/ssh.exe"\nscp = "C:/OpenSSH/scp.exe"'))
+    app = App(load_config(str(toml)), dry_run=True)
+    app.sync()
+    firsts = {c[0] for c in app.remote.log}
+    assert firsts == {"C:/OpenSSH/ssh.exe", "C:/OpenSSH/scp.exe"}
+
+
+def test_uge_is_running_looks_the_job_up_in_qstat():
+    cmd = UGE.is_running.format(jobid="42")
+    assert cmd.startswith("out=$(qstat 2>/dev/null) || exit 2;")
+    assert "awk -v j=42 '$1 == j {f = 1} END {exit !f}'" in cmd
+
+
+def test_watch_polls_locally_then_shows_the_log(project, monkeypatch, capsys):
+    app = App(load_config(str(project / "hpcjob.toml")))
+    answers = iter([0, 2, 0, 1])                       # running, check failed, running, gone
+    checks, sleeps = [], []
+    monkeypatch.setattr(app.remote, "code", lambda cmd: checks.append(cmd) or next(answers))
+    monkeypatch.setattr(app.remote, "run", lambda cmd, **kw: "last log line\n")
+    monkeypatch.setattr("hpcjob.cli.time.sleep", sleeps.append)
+    assert app.watch("42") == 0
+    assert checks == [UGE.is_running.format(jobid="42")] * 4 and sleeps == [60, 60, 60]
+    out = capsys.readouterr().out
+    assert "could not check job 42" in out and "last log line" in out
+
+
+def test_watch_stops_after_repeated_check_failures(project, monkeypatch):
+    app = App(load_config(str(project / "hpcjob.toml")))
+    monkeypatch.setattr(app.remote, "code", lambda cmd: 255)
+    monkeypatch.setattr("hpcjob.cli.time.sleep", lambda s: None)
+    with pytest.raises(RemoteError):
+        app.watch("42")
+
+
+def test_watch_gives_up_after_max_minutes(project, monkeypatch, capsys):
+    app = App(load_config(str(project / "hpcjob.toml")))
+    clock = iter(range(0, 10_000, 60))                 # each call advances one poll
+    monkeypatch.setattr(app.remote, "code", lambda cmd: 0)
+    monkeypatch.setattr("hpcjob.cli.time.sleep", lambda s: None)
+    monkeypatch.setattr("hpcjob.cli.time.monotonic", lambda: next(clock))
+    assert app.watch("42", max_minutes=3) == 3
+    assert "STILL_RUNNING" in capsys.readouterr().out
+
+
+def test_undo_msys_conversion_restores_cluster_paths():
+    root = "C:/Program Files/Git"
+    got = undo_msys_conversion(["C:/Program Files/Git/gs/fs/g/run", "--data=C:/Program Files/Git/work/8",
+                                "relative/x", "C:/Users/me/local", "a /b"], root)
+    assert got == ["/gs/fs/g/run", "--data=/work/8", "relative/x", "C:/Users/me/local", "a /b"]
+    assert undo_msys_conversion(["/gs/fs/x"], None) == ["/gs/fs/x"]       # not under Git Bash
 
 
 def test_missing_job_script_is_reported(project):

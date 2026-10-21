@@ -27,7 +27,8 @@ the fixes in and keeps everything else out of the way.
 - **Safe by default**: walltime is capped (`max_walltime`), `--trial` runs are capped
   harder, `watch` polls the login node no more than once per `poll_seconds`, and
   `usage` refuses to overwrite accounting data with a suspiciously short fetch.
-- **Windows-friendly**: uploaded text files are normalised to LF on the cluster.
+- **Windows-friendly**: uploaded text files are normalised to LF on the cluster, and
+  cluster paths that Git Bash rewrote (`/gs/x` -> `C:/.../Git/gs/x`) are restored.
 - **`--dry-run`** prints every `ssh` / `scp` command instead of running it.
 - **Usage report**: `qacct` / `sacct` output becomes `USAGE.md` and `usage.csv`
   with a configurable cost model (elapsed node-hours or a weighted mix of elapsed
@@ -70,7 +71,7 @@ project/
 | `submit SCRIPT [-r RES] [-t WALL] [-n NAME] [--trial] [-- ARGS...]` | sync, submit `jobs/SCRIPT`, print the job id, append a line to `hpcjob-joblog.tsv` |
 | `status` | `squeue` / `qstat` |
 | `log JOBID [--lines N]` | tail the job's log file |
-| `watch JOBID` | block until the job leaves the queue, then show the log tail |
+| `watch JOBID [--max-minutes M]` | block until the job leaves the queue, then show the log tail; with `--max-minutes`, give up after M minutes and exit 3 (the job keeps running) |
 | `cancel JOBID...` | `scancel` / `qdel` |
 | `pull REMOTE_REL [LOCAL_DIR]` | `scp -r` a result folder back |
 | `push LOCAL_DIR REMOTE_REL` | upload an arbitrary folder (non-recursive, LF-normalised) |
@@ -127,7 +128,7 @@ pip install -e .[test]
 pytest
 ```
 
-Sixteen tests cover walltime parsing, both schedulers' submit / watch commands and
+Twenty-two tests cover walltime parsing, both schedulers' submit commands and
 job-id parsing, the `qacct` and `sacct` parsers, the cost model, and the CLI in
 dry-run mode (including the walltime cap and the job log). No cluster is needed.
 
@@ -135,8 +136,9 @@ dry-run mode (including the walltime cap and the job log). No cluster is needed.
 
 - Everything that touches the cluster goes through `Remote`, which records every
   command it issues; that is what makes the CLI testable without a scheduler.
-- A single `ssh` session does the polling in `watch`, so the laptop can sleep and
-  the login node sees one connection instead of one per poll.
+- `watch` polls from the laptop, one short `ssh` per `poll_seconds`. An earlier version
+  left a `while qstat; sleep` loop on the login node for the whole job, which breaks
+  the run-time limit many centres set on login nodes.
 - The accounting fetch keeps a raw copy (`usage/accounting_raw.txt`) and will not
   replace it with something less than half its size: a DNS hiccup once wiped a
   month of records this way.
@@ -167,13 +169,18 @@ Slurm または Grid Engine(UGE/SGE)のクラスタを、手元の PC から 1 �
 - 安全側の既定: walltime の上限(`max_walltime`)、`--trial` はさらに短い上限、`watch` の
   ポーリングは `poll_seconds` 以下の頻度(ログインノードへの配慮)、`usage` は取得結果が
   極端に短いとき既存データを上書きしません
-- アップロードしたテキストファイルはクラスタ側で LF に正規化(Windows 対策)
+- `watch` は手元から `poll_seconds` ごとに短い `ssh` で確かめます(ログインノードに常駐する
+  ループを残さない)。`--max-minutes` で待つ上限を決められ、超えたら終了コード 3 で戻ります
+- `[remote]` の `ssh` / `scp` で使う実行ファイルを選べます(Windows で ssh-agent を使うなら
+  `C:/Windows/System32/OpenSSH/ssh.exe`)
+- アップロードしたテキストファイルはクラスタ側で LF に正規化(Windows 対策)。Git Bash が
+  書き換えたクラスタ側のパス(`/gs/x` → `C:/.../Git/gs/x`)も元に戻します
 - `--dry-run` で実行される `ssh` / `scp` コマンドをすべて表示
 - `qacct` / `sacct` の出力を `USAGE.md` と `usage.csv` に変換。コストは資源種別ごとの係数と
   「実行時間と要求時間の重み付き和」で計算(センターの課金方式に合わせて設定)
 
 使い方は上の英語セクションの表と同じです。`pip install -e .[test]` → `pytest` で、
-クラスタ無しで 16 件のテストが走ります。
+クラスタ無しで 22 件のテストが走ります。
 
 Claude Code を下書きの相棒として使って書きました。設計、安全ルールの元になった運用経験、
 テストは私のものです。MIT ライセンス。

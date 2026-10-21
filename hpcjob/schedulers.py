@@ -21,7 +21,7 @@ class Scheduler:
     submit: str
     status: str
     cancel: str
-    is_running: str          # shell test, exit 0 while the job exists
+    is_running: str          # shell test: exit 0 while the job exists, 1 once it is gone, other = unknown
     log: str
     jobid_regex: str
     accounting: str          # command that prints raw accounting records
@@ -49,11 +49,9 @@ class Scheduler:
         m = re.search(self.jobid_regex, submit_output)
         return m.group(1) if m else None
 
-    def watch_command(self, *, jobid: str, logdir: str, poll: int, lines: int = 80) -> str:
-        running = self.is_running.format(jobid=jobid)
+    def tail_command(self, *, jobid: str, logdir: str, lines: int = 80) -> str:
         tail = self.log.format(logdir=logdir, jobid=jobid, lines=lines)
-        return (f"while {running}; do sleep {poll}; done; "
-                f"echo '--- job {jobid} finished ---'; {tail} 2>/dev/null || echo 'no log found'")
+        return f"{tail} 2>/dev/null || echo 'no log found'"
 
 
 SLURM = Scheduler(
@@ -76,7 +74,10 @@ UGE = Scheduler(
             "-N {name} -o {logdir} -j y {jobsdir}/{script} {args}"),
     status="qstat",
     cancel="qdel {jobid}",
-    is_running="qstat -j {jobid} >/dev/null 2>&1",
+    # `qstat -j` exits 0 even for a finished job on some sites, so look the id up in the
+    # user's job list instead. Exit 2 when qstat itself fails, so `watch` keeps waiting.
+    is_running=("out=$(qstat 2>/dev/null) || exit 2; "
+                "printf '%s\\n' \"$out\" | awk -v j={jobid} '$1 == j {{f = 1}} END {{exit !f}}'"),
     log="tail -n {lines} {logdir}/*.o{jobid}",
     jobid_regex=r"Your job (\d+)",
     accounting="qacct -j '*' -b {since}",
